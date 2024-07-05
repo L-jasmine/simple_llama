@@ -1,0 +1,20 @@
+[package]
+name = "lua_llama"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5.7", features = ["derive"] }
+encoding_rs = "0.8.34"
+mlua = { version = "0.9.9", features = ["lua54", "vendored"] }
+scoped-tls = "1.0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yml = "0.0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7.11", features = ["time"] }
+toml = "0.8.14"
+llama-cpp-2 = { version = "0.1.60", path="../llama-cpp-rs/llama-cpp-2"}
