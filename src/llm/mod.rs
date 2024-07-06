@@ -1,16 +1,19 @@
 use std::{fmt::Display, sync::Arc};
 
 use llama_cpp_2::{
-    context::{params::LlamaContextParams, LlamaContext},
+    context::LlamaContext,
     llama_backend::LlamaBackend,
     llama_batch::LlamaBatch,
-    model::{self, params::LlamaModelParams, LlamaModel, Special},
+    model::{self, LlamaModel, Special},
     token::data_array::LlamaTokenDataArray,
 };
 
 pub mod gemma;
 pub mod llama3;
 pub mod qwen;
+
+pub use llama_cpp_2::context::params::LlamaContextParams;
+pub use llama_cpp_2::model::params::LlamaModelParams;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Role {
@@ -46,7 +49,7 @@ pub struct Content {
 }
 
 pub struct LlmPromptTemplate {
-    pub encode_string: fn(content: &[super::Content]) -> String,
+    pub encode_string: fn(content: &[Content]) -> String,
     pub is_end_of_header: fn(token: &str) -> bool,
     // for gemma2
     pub post_handle: fn(token: String) -> Option<String>,
@@ -91,7 +94,7 @@ pub struct LlamaModelContext {
     ctx: LlamaContext<'static>,
     batch: LlamaBatch,
     model: Arc<LlmModel>,
-    system_prompt: Vec<super::Content>,
+    system_prompt: Vec<Content>,
     first_chat: bool,
     n_cur: i32,
 }
@@ -121,7 +124,11 @@ impl<'a> Iterator for LlamaModelChatStream<'a> {
 }
 
 impl LlamaModelContext {
-    pub fn new(model: Arc<LlmModel>, ctx_params: LlamaContextParams) -> anyhow::Result<Self> {
+    pub fn new(
+        model: Arc<LlmModel>,
+        ctx_params: LlamaContextParams,
+        system_prompt: Option<Vec<Content>>,
+    ) -> anyhow::Result<Self> {
         let ctx = model.model.new_context(&model.backend, ctx_params)?;
         let n_tokens = ctx.n_ctx();
         let ctx = unsafe { std::mem::transmute(ctx) };
@@ -134,17 +141,12 @@ impl LlamaModelContext {
             model,
             batch,
             n_cur: 0,
-            system_prompt: Vec::new(),
+            system_prompt: system_prompt.unwrap_or_default(),
             first_chat: true,
         })
     }
 
-    pub fn system_prompt(&mut self, prompt: Vec<super::Content>) -> anyhow::Result<()> {
-        self.system_prompt = prompt;
-        Ok(())
-    }
-
-    pub fn user_message(&mut self, message: super::Content) -> anyhow::Result<()> {
+    pub fn user_message(&mut self, message: Content) -> anyhow::Result<()> {
         let encode_string = self.model.prompt_template.encode_string;
 
         if self.first_chat {
@@ -174,7 +176,7 @@ impl LlamaModelContext {
         Ok(())
     }
 
-    pub fn chat(&mut self, message: super::Content) -> anyhow::Result<LlamaModelChatStream> {
+    pub fn chat(&mut self, message: Content) -> anyhow::Result<LlamaModelChatStream> {
         self.user_message(message)?;
         let is_end_of_header = self.model.prompt_template.is_end_of_header;
         self.decoder = encoding_rs::UTF_8.new_decoder();
@@ -211,6 +213,123 @@ impl LlamaModelContext {
                     .decode_to_string(&output_bytes, &mut output_string, false);
 
             Ok(Some(output_string))
+        }
+    }
+}
+
+pub struct LlamaModelFullPromptContext {
+    decoder: encoding_rs::Decoder,
+    ctx: LlamaContext<'static>,
+    batch: LlamaBatch,
+    model: Arc<LlmModel>,
+    prompts: Vec<Content>,
+    n_cur: usize,
+}
+
+impl LlamaModelFullPromptContext {
+    pub fn new(
+        model: Arc<LlmModel>,
+        ctx_params: LlamaContextParams,
+        system_prompts: Option<Vec<Content>>,
+    ) -> anyhow::Result<Self> {
+        let ctx = model.model.new_context(&model.backend, ctx_params)?;
+        let n_tokens = ctx.n_ctx();
+        let ctx = unsafe { std::mem::transmute(ctx) };
+        let batch = LlamaBatch::new(n_tokens as usize, 1);
+        let decoder = encoding_rs::UTF_8.new_decoder();
+
+        Ok(Self {
+            decoder,
+            ctx,
+            model,
+            batch,
+            prompts: system_prompts.unwrap_or_default(),
+            n_cur: 0,
+        })
+    }
+
+    pub fn add_message(&mut self, message: Content) {
+        self.prompts.push(message);
+    }
+
+    pub fn chat(&mut self, message: Content) -> anyhow::Result<LlamaModelFullPromptChatStream> {
+        self.add_message(message);
+        self.decoder = encoding_rs::UTF_8.new_decoder();
+        let is_end_of_header = self.model.prompt_template.is_end_of_header;
+        let start_out = is_end_of_header("");
+
+        self.reset_batch_with_prompt()?;
+
+        Ok(LlamaModelFullPromptChatStream {
+            start_out,
+            llama_ctx: self,
+        })
+    }
+
+    fn reset_batch_with_prompt(&mut self) -> anyhow::Result<()> {
+        self.batch.clear();
+        let encode_string = self.model.prompt_template.encode_string;
+
+        let tokens = self
+            .model
+            .model
+            .str_to_token(&encode_string(&self.prompts), model::AddBos::Always)?;
+
+        self.batch.add_sequence(&tokens, 0, false)?;
+        self.n_cur = tokens.len();
+        Ok(())
+    }
+
+    pub fn take_a_token(&mut self) -> anyhow::Result<Option<String>> {
+        self.ctx.decode(&mut self.batch)?;
+
+        let candidates = self.ctx.candidates_ith(self.batch.n_tokens() - 1);
+        let mut candidates_p = LlamaTokenDataArray::from_iter(candidates, false);
+
+        let new_token_id = candidates_p.sample_token(&mut self.ctx);
+
+        self.batch.clear();
+        self.batch
+            .add(new_token_id, self.n_cur as i32, &[0], true)?;
+        self.n_cur += 1;
+
+        if new_token_id == self.model.model.token_eos() {
+            return Ok(None);
+        } else {
+            let output_bytes = self
+                .model
+                .model
+                .token_to_bytes(new_token_id, Special::Tokenize)?;
+            let mut output_string = String::with_capacity(32);
+            let _decode_result =
+                self.decoder
+                    .decode_to_string(&output_bytes, &mut output_string, false);
+
+            Ok(Some(output_string))
+        }
+    }
+}
+
+pub struct LlamaModelFullPromptChatStream<'a> {
+    start_out: bool,
+    llama_ctx: &'a mut LlamaModelFullPromptContext,
+}
+
+impl<'a> Iterator for LlamaModelFullPromptChatStream<'a> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let s = self.llama_ctx.take_a_token().ok()??;
+            let post_handle = self.llama_ctx.model.prompt_template.post_handle;
+            if self.start_out {
+                break post_handle(s);
+            } else {
+                let is_end_of_header = self.llama_ctx.model.prompt_template.is_end_of_header;
+                if is_end_of_header(&s) {
+                    self.start_out = true;
+                }
+            }
         }
     }
 }

@@ -11,13 +11,10 @@ pub fn gemma2_prompt_template() -> super::LlmPromptTemplate {
     }
 
     fn is_end_of_header(token: &str) -> bool {
-        println!("|{token}|");
         token.ends_with("\n")
     }
 
     fn post_handle(token: String) -> Option<String> {
-        println!("|{token}|");
-
         if token == "<end_of_turn>" {
             None
         } else {

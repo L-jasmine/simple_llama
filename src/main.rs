@@ -1,10 +1,8 @@
+use clap::{Parser, ValueEnum};
 use std::{collections::HashMap, io::Write, num::NonZeroU32, sync::Arc};
 
-use clap::{Parser, ValueEnum};
-use llama_cpp_2::{context::params::LlamaContextParams, model::params::LlamaModelParams};
-use llm::Content;
+use lua_llama::llm::{self, Content, LlamaContextParams, LlamaModelParams};
 
-mod llm;
 mod script_runtime;
 
 #[derive(Debug, Parser)]
@@ -20,6 +18,10 @@ struct Args {
     /// Type of the model
     #[arg(short('t'), long, value_enum)]
     model_type: ModelType,
+
+    /// full prompt chat
+    #[arg(long)]
+    full_chat: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -31,12 +33,13 @@ enum ModelType {
 }
 
 fn chat(sys_prompt: Vec<Content>, llm: Arc<llm::LlmModel>) {
+    println!("run chat");
+
     let lua = script_runtime::lua_env().unwrap();
 
     let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(1024 * 2));
 
-    let mut ctx = llm::LlamaModelContext::new(llm.clone(), ctx_params).unwrap();
-    ctx.system_prompt(sys_prompt).unwrap();
+    let mut ctx = llm::LlamaModelContext::new(llm.clone(), ctx_params, Some(sys_prompt)).unwrap();
 
     let input = std::io::stdin();
     let mut lua_result = None;
@@ -102,6 +105,85 @@ fn chat(sys_prompt: Vec<Content>, llm: Arc<llm::LlmModel>) {
     }
 }
 
+fn full_chat(sys_prompt: Vec<Content>, llm: Arc<llm::LlmModel>) {
+    println!("run full chat");
+    let lua = script_runtime::lua_env().unwrap();
+
+    let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(1024 * 2));
+
+    let mut ctx =
+        llm::LlamaModelFullPromptContext::new(llm.clone(), ctx_params, Some(sys_prompt)).unwrap();
+
+    let input = std::io::stdin();
+    let mut lua_result = None;
+
+    loop {
+        let contont = match lua_result.take() {
+            Some(s) => {
+                println!("Tool:");
+                let message = format!("{{ \"role\":\"tool\",\"message\":{s}}}");
+                println!("{message}");
+                Content {
+                    role: llm::Role::User,
+                    message,
+                }
+            }
+            None => {
+                println!("User:");
+                let mut line = String::with_capacity(128);
+                input.read_line(&mut line).unwrap();
+                Content {
+                    role: llm::Role::User,
+                    message: serde_json::json!({
+                        "role":"user",
+                        "message":line
+                    })
+                    .to_string(),
+                }
+            }
+        };
+
+        let mut chat = ctx.chat(contont).unwrap();
+
+        println!("AI:");
+        let mut lua_msg = String::with_capacity(128);
+        while let Some(t) = chat.next() {
+            print!("{}", t);
+            std::io::stdout().flush().unwrap();
+            lua_msg.push_str(&t);
+        }
+
+        ctx.add_message(Content {
+            role: llm::Role::Assistant,
+            message: lua_msg.clone(),
+        });
+
+        println!();
+
+        if lua_msg.is_empty() || lua_msg.starts_with("--") {
+            continue;
+        }
+
+        let s = lua.load(lua_msg).eval::<Option<String>>();
+
+        let r = match s {
+            Ok(Some(s)) => Some(s),
+            Ok(None) => None,
+            Err(e) => Some(
+                serde_json::json!({
+                    "role":"tool",
+                    "message":{
+                        "status":"error",
+                        "error":e.to_string()
+                    }
+                })
+                .to_string(),
+            ),
+        };
+        lua_result = r;
+    }
+}
+
 fn main() {
     let cli = Args::parse();
 
@@ -109,7 +191,7 @@ fn main() {
     let mut prompt: HashMap<String, Vec<Content>> = toml::from_str(&prompt).unwrap();
     let sys_prompt = prompt.remove("content").unwrap();
 
-    let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
+    let model_params = LlamaModelParams::default().with_n_gpu_layers(512);
 
     let template = match cli.model_type {
         ModelType::Llama3 => llm::llama3::llama3_prompt_template(),
@@ -119,5 +201,9 @@ fn main() {
     };
 
     let llm = llm::LlmModel::new(cli.model_path, model_params, template).unwrap();
-    chat(sys_prompt, llm);
+    if cli.full_chat {
+        full_chat(sys_prompt, llm);
+    } else {
+        chat(sys_prompt, llm);
+    }
 }
