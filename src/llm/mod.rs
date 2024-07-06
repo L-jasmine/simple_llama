@@ -267,6 +267,7 @@ impl LlamaModelFullPromptContext {
     }
 
     fn reset_batch_with_prompt(&mut self) -> anyhow::Result<()> {
+        self.ctx.clear_kv_cache();
         self.batch.clear();
         let encode_string = self.model.prompt_template.encode_string;
 
