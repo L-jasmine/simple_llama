@@ -188,7 +188,7 @@ impl LlamaModelContext {
         })
     }
 
-    pub fn take_a_token(&mut self) -> anyhow::Result<Option<String>> {
+    fn take_a_token(&mut self) -> anyhow::Result<Option<String>> {
         self.ctx.decode(&mut self.batch)?;
 
         let candidates = self.ctx.candidates_ith(self.batch.n_tokens() - 1);
@@ -281,7 +281,7 @@ impl LlamaModelFullPromptContext {
         Ok(())
     }
 
-    pub fn take_a_token(&mut self) -> anyhow::Result<Option<String>> {
+    fn take_a_token(&mut self) -> anyhow::Result<Option<String>> {
         self.ctx.decode(&mut self.batch)?;
 
         let candidates = self.ctx.candidates_ith(self.batch.n_tokens() - 1);
