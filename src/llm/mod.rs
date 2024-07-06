@@ -15,7 +15,7 @@ pub mod qwen;
 pub use llama_cpp_2::context::params::LlamaContextParams;
 pub use llama_cpp_2::model::params::LlamaModelParams;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     #[serde(rename = "system")]
     System,
@@ -222,7 +222,7 @@ pub struct LlamaModelFullPromptContext {
     ctx: LlamaContext<'static>,
     batch: LlamaBatch,
     model: Arc<LlmModel>,
-    prompts: Vec<Content>,
+    pub prompts: Vec<Content>,
     n_cur: usize,
 }
 
@@ -263,6 +263,7 @@ impl LlamaModelFullPromptContext {
         Ok(LlamaModelFullPromptChatStream {
             start_out,
             llama_ctx: self,
+            content_buff: String::new(),
         })
     }
 
@@ -314,23 +315,43 @@ impl LlamaModelFullPromptContext {
 pub struct LlamaModelFullPromptChatStream<'a> {
     start_out: bool,
     llama_ctx: &'a mut LlamaModelFullPromptContext,
+    content_buff: String,
 }
 
 impl<'a> Iterator for LlamaModelFullPromptChatStream<'a> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let s = self.llama_ctx.take_a_token().ok()??;
-            let post_handle = self.llama_ctx.model.prompt_template.post_handle;
-            if self.start_out {
-                break post_handle(s);
-            } else {
-                let is_end_of_header = self.llama_ctx.model.prompt_template.is_end_of_header;
-                if is_end_of_header(&s) {
-                    self.start_out = true;
+        fn next_(stream: &mut LlamaModelFullPromptChatStream<'_>) -> Option<String> {
+            loop {
+                let s = stream.llama_ctx.take_a_token();
+                if s.is_err() {
+                    println!("{:?}", s);
+                }
+                let s = s.ok()??;
+                let post_handle = stream.llama_ctx.model.prompt_template.post_handle;
+                if stream.start_out {
+                    break post_handle(s);
+                } else {
+                    let is_end_of_header = stream.llama_ctx.model.prompt_template.is_end_of_header;
+                    if is_end_of_header(&s) {
+                        stream.start_out = true;
+                    }
                 }
             }
         }
+
+        let r = next_(self);
+        if let Some(s) = &r {
+            self.content_buff.push_str(s);
+        } else {
+            let mut message = String::new();
+            std::mem::swap(&mut message, &mut self.content_buff);
+            self.llama_ctx.add_message(Content {
+                role: Role::Assistant,
+                message,
+            })
+        }
+        r
     }
 }
