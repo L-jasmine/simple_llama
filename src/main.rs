@@ -1,9 +1,10 @@
 use clap::{Parser, ValueEnum};
-use std::{collections::HashMap, io::Write, num::NonZeroU32};
+use lua_env::new_lua_hook;
+use std::{collections::HashMap, num::NonZeroU32};
 
 use lua_llama::{
+    hook_llm,
     llm::{self, Content, LlamaContextParams, LlamaModelParams},
-    script_llm::{self, ChatHook, Token},
 };
 
 #[derive(Debug, Parser)]
@@ -34,6 +35,12 @@ enum ModelType {
 }
 
 mod lua_env {
+    use std::io::Write;
+
+    use lua_llama::{
+        llm::{Content, Role},
+        IOHook,
+    };
     use mlua::prelude::*;
 
     pub fn new_lua_env() -> Result<Lua, LuaError> {
@@ -95,6 +102,96 @@ mod lua_env {
         Ok(lua)
     }
 
+    pub struct LuaHook {
+        lua: Lua,
+        lua_result: Option<String>,
+        stdin: std::io::Stdin,
+    }
+
+    impl IOHook for LuaHook {
+        fn get_input(&mut self) -> anyhow::Result<Option<lua_llama::llm::Content>> {
+            if let Some(lua_result) = self.lua_result.take() {
+                println!("Lua:");
+                println!("{}", lua_result);
+                let c = Content {
+                    role: Role::Tool,
+                    message: lua_result,
+                };
+                Ok(Some(c))
+            } else {
+                println!("User:");
+                let mut line = String::with_capacity(64);
+                self.stdin.read_line(&mut line)?;
+                let c = Content {
+                    role: Role::User,
+                    message: line,
+                };
+                Ok(Some(c))
+            }
+        }
+
+        fn token_callback(&mut self, token: lua_llama::Token) -> anyhow::Result<()> {
+            match token {
+                lua_llama::Token::Start => println!("AI:"),
+                lua_llama::Token::Chunk(t) => {
+                    print!("{}", t);
+                    std::io::stdout().flush().unwrap();
+                }
+                lua_llama::Token::End(full_output) => {
+                    println!();
+                    if full_output.is_empty() || full_output.starts_with("--") {
+                        return Ok(());
+                    } else {
+                        let s = self.lua.load(full_output).eval::<Option<String>>();
+
+                        let r = match s {
+                            Ok(Some(s)) => Some(s),
+                            Ok(None) => None,
+                            Err(err) => Some(
+                                serde_json::json!(
+                                    {
+                                        "status":"error",
+                                        "error":err.to_string()
+                                    }
+                                )
+                                .to_string(),
+                            ),
+                        };
+                        self.lua_result = r;
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn parse_input(&mut self, content: &mut lua_llama::llm::Content) {
+            match content.role {
+                Role::User => {
+                    content.message = serde_json::json!({
+                        "role":"user",
+                        "message":content.message
+                    })
+                    .to_string();
+                }
+                Role::Tool => {
+                    content.role = Role::User;
+                    content.message =
+                        format!("{{ \"role\":\"tool\",\"message\":{}}}", content.message);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn new_lua_hook() -> Result<LuaHook, LuaError> {
+        let lua = new_lua_env()?;
+        Ok(LuaHook {
+            lua,
+            lua_result: None,
+            stdin: std::io::stdin(),
+        })
+    }
+
     #[test]
     fn run() {
         let lua = new_lua_env().unwrap();
@@ -120,7 +217,6 @@ fn main() {
     };
 
     let llm = llm::LlmModel::new(cli.model_path, model_params, template).unwrap();
-    let lua = lua_env::new_lua_env().unwrap();
 
     let ctx = if cli.full_chat {
         let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(1024 * 2));
@@ -134,68 +230,10 @@ fn main() {
             .into()
     };
 
-    {
-        fn get_user_input(data: &mut std::io::Stdin) -> anyhow::Result<Option<String>> {
-            println!("User:");
-            let mut line = String::with_capacity(128);
-            data.read_line(&mut line)?;
-            let line = serde_json::json!({
-                "role":"user",
-                "message":line
-            })
-            .to_string();
-            Ok(Some(line))
-        }
-
-        fn token_callback(_data: &mut std::io::Stdin, token: Token) -> anyhow::Result<()> {
-            match token {
-                Token::Start => println!("AI:"),
-                Token::Chunk(t) => {
-                    print!("{}", t);
-                    std::io::stdout().flush().unwrap();
-                }
-                Token::End(_) => println!(),
-            };
-            Ok(())
-        }
-
-        fn parse_user_input(_data: &mut std::io::Stdin, input: &str) -> String {
-            serde_json::json!({
-                "role":"user",
-                "message":input
-            })
-            .to_string()
-        }
-
-        fn parse_script_result(_data: &mut std::io::Stdin, result: &str) -> String {
-            format!("{{ \"role\":\"tool\",\"message\":{result}}}")
-        }
-
-        fn parse_script_error(_data: &mut std::io::Stdin, err: mlua::Error) -> String {
-            serde_json::json!({
-                "role":"tool",
-                "message":{
-                    "status":"error",
-                    "error":err.to_string()
-                }
-            })
-            .to_string()
-        }
-
-        let hook = ChatHook {
-            data: std::io::stdin(),
-            get_user_input,
-            token_callback,
-            parse_user_input,
-            parse_script_result,
-            parse_script_error,
-        };
-        let mut script_llm = script_llm::LuaLlama {
-            llm: ctx,
-            lua,
-            hook,
-        };
-
-        script_llm.chat().unwrap();
+    let mut script_llm = hook_llm::HookLlama {
+        llm: ctx,
+        hook: new_lua_hook().unwrap(),
     };
+
+    script_llm.chat().unwrap();
 }
