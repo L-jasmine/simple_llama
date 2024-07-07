@@ -154,38 +154,39 @@ fn main() {
                     print!("{}", t);
                     std::io::stdout().flush().unwrap();
                 }
-                Token::End => println!(),
+                Token::End(_) => println!(),
             };
             Ok(())
         }
 
-        fn parse_script_result(_data: &mut std::io::Stdin, result: &str) -> anyhow::Result<String> {
-            let message = format!("{{ \"role\":\"tool\",\"message\":{result}}}");
-            println!("Tool:");
-            println!("{message}");
-            Ok(message)
+        fn parse_user_input(_data: &mut std::io::Stdin, input: &str) -> String {
+            serde_json::json!({
+                "role":"user",
+                "message":input
+            })
+            .to_string()
         }
 
-        fn parse_script_error(
-            _data: &mut std::io::Stdin,
-            err: mlua::Error,
-        ) -> anyhow::Result<String> {
-            let message = serde_json::json!({
+        fn parse_script_result(_data: &mut std::io::Stdin, result: &str) -> String {
+            format!("{{ \"role\":\"tool\",\"message\":{result}}}")
+        }
+
+        fn parse_script_error(_data: &mut std::io::Stdin, err: mlua::Error) -> String {
+            serde_json::json!({
                 "role":"tool",
                 "message":{
                     "status":"error",
                     "error":err.to_string()
                 }
             })
-            .to_string();
-            println!("{message}");
-            Ok(message)
+            .to_string()
         }
 
         let hook = ChatHook {
             data: std::io::stdin(),
             get_user_input,
             token_callback,
+            parse_user_input,
             parse_script_result,
             parse_script_error,
         };

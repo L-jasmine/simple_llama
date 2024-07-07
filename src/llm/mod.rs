@@ -94,7 +94,7 @@ pub struct LlamaModelContext {
     ctx: LlamaContext<'static>,
     batch: LlamaBatch,
     model: Arc<LlmModel>,
-    system_prompt: Vec<Content>,
+    pub system_prompt: Vec<Content>,
     first_chat: bool,
     n_cur: i32,
 }

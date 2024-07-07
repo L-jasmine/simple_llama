@@ -25,18 +25,20 @@ pub struct LuaLlama<Data> {
     pub hook: ChatHook<Data>,
 }
 
+#[derive(Debug, Clone)]
 pub enum Token {
     Start,
     Chunk(String),
-    End,
+    End(String),
 }
 
 pub struct ChatHook<Data> {
     pub data: Data,
     pub get_user_input: fn(&mut Data) -> anyhow::Result<Option<String>>,
     pub token_callback: fn(&mut Data, token: Token) -> anyhow::Result<()>,
-    pub parse_script_result: fn(&mut Data, result: &str) -> anyhow::Result<String>,
-    pub parse_script_error: fn(&mut Data, err: mlua::Error) -> anyhow::Result<String>,
+    pub parse_user_input: fn(&mut Data, result: &str) -> String,
+    pub parse_script_result: fn(&mut Data, result: &str) -> String,
+    pub parse_script_error: fn(&mut Data, err: mlua::Error) -> String,
 }
 
 fn full_chat<Data>(
@@ -49,7 +51,7 @@ fn full_chat<Data>(
     loop {
         let contont = match lua_result.take() {
             Some(s) => {
-                let message = (hook.parse_script_result)(&mut hook.data, &s)?;
+                let message = (hook.parse_script_result)(&mut hook.data, &s);
                 Content {
                     role: llm::Role::User,
                     message,
@@ -57,7 +59,8 @@ fn full_chat<Data>(
             }
             None => {
                 let message = (hook.get_user_input)(&mut hook.data)?;
-                if let Some(message) = message {
+                if let Some(s) = message {
+                    let message = (hook.parse_user_input)(&mut hook.data, &s);
                     Content {
                         role: llm::Role::User,
                         message,
@@ -74,9 +77,10 @@ fn full_chat<Data>(
         while let Some(t) = chat.next() {
             (hook.token_callback)(&mut hook.data, Token::Chunk(t))?;
         }
-        (hook.token_callback)(&mut hook.data, Token::End)?;
+        drop(chat);
 
         let lua_msg = &ctx.prompts.last().unwrap().message;
+        (hook.token_callback)(&mut hook.data, Token::End(lua_msg.clone()))?;
 
         if lua_msg.is_empty() || lua_msg.starts_with("--") {
             continue;
@@ -87,7 +91,7 @@ fn full_chat<Data>(
         let r = match s {
             Ok(Some(s)) => Some(s),
             Ok(None) => None,
-            Err(e) => Some((hook.parse_script_error)(&mut hook.data, e)?),
+            Err(e) => Some((hook.parse_script_error)(&mut hook.data, e)),
         };
         lua_result = r;
     }
@@ -103,7 +107,7 @@ fn chat<Data>(
     loop {
         let contont = match lua_result.take() {
             Some(s) => {
-                let message = (hook.parse_script_result)(&mut hook.data, &s)?;
+                let message = (hook.parse_script_result)(&mut hook.data, &s);
                 Content {
                     role: llm::Role::User,
                     message,
@@ -111,7 +115,9 @@ fn chat<Data>(
             }
             None => {
                 let message = (hook.get_user_input)(&mut hook.data)?;
-                if let Some(message) = message {
+                if let Some(s) = message {
+                    let message = (hook.parse_user_input)(&mut hook.data, &s);
+
                     Content {
                         role: llm::Role::User,
                         message,
@@ -131,7 +137,7 @@ fn chat<Data>(
             lua_msg += &t;
             (hook.token_callback)(&mut hook.data, Token::Chunk(t))?;
         }
-        (hook.token_callback)(&mut hook.data, Token::End)?;
+        (hook.token_callback)(&mut hook.data, Token::End(lua_msg.clone()))?;
 
         if lua_msg.is_empty() || lua_msg.starts_with("--") {
             continue;
@@ -142,13 +148,34 @@ fn chat<Data>(
         let r = match s {
             Ok(Some(s)) => Some(s),
             Ok(None) => None,
-            Err(e) => Some((hook.parse_script_error)(&mut hook.data, e)?),
+            Err(e) => Some((hook.parse_script_error)(&mut hook.data, e)),
         };
         lua_result = r;
     }
 }
 
 impl<Data> LuaLlama<Data> {
+    pub fn new(mut llm: LlamaCtx, lua: Lua, mut hook: ChatHook<Data>) -> Self {
+        let prompts = match &mut llm {
+            LlamaCtx::Full(ctx) => &mut ctx.prompts,
+            LlamaCtx::Continuous(ctx) => &mut ctx.system_prompt,
+        };
+
+        for prompt in prompts.iter_mut() {
+            match prompt.role {
+                llm::Role::User => {
+                    prompt.message = (hook.parse_user_input)(&mut hook.data, &prompt.message);
+                }
+                llm::Role::Tool => {
+                    prompt.message = (hook.parse_script_result)(&mut hook.data, &prompt.message);
+                }
+                _ => (),
+            }
+        }
+
+        Self { llm, lua, hook }
+    }
+
     pub fn chat(&mut self) -> anyhow::Result<()> {
         match &mut self.llm {
             LlamaCtx::Full(ctx) => full_chat(ctx, &self.lua, &mut self.hook),
