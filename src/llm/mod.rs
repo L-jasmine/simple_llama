@@ -102,14 +102,27 @@ pub struct LlamaModelContext {
 pub struct LlamaModelChatStream<'a> {
     start_out: bool,
     llama_ctx: &'a mut LlamaModelContext,
+    is_error: bool,
 }
 
 impl<'a> Iterator for LlamaModelChatStream<'a> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.is_error {
+            return None;
+        }
+
         loop {
-            let s = self.llama_ctx.take_a_token().ok()??;
+            let s = self.llama_ctx.take_a_token();
+
+            if let Err(e) = s {
+                self.is_error = true;
+                return Some(e.to_string());
+            }
+
+            let s = s.unwrap()?;
+
             let post_handle = self.llama_ctx.model.prompt_template.post_handle;
             if self.start_out {
                 break post_handle(s);
@@ -185,6 +198,7 @@ impl LlamaModelContext {
         Ok(LlamaModelChatStream {
             start_out,
             llama_ctx: self,
+            is_error: false,
         })
     }
 
@@ -264,6 +278,7 @@ impl LlamaModelFullPromptContext {
             start_out,
             llama_ctx: self,
             content_buff: String::new(),
+            is_error: false,
         })
     }
 
@@ -316,6 +331,7 @@ pub struct LlamaModelFullPromptChatStream<'a> {
     start_out: bool,
     llama_ctx: &'a mut LlamaModelFullPromptContext,
     content_buff: String,
+    is_error: bool,
 }
 
 impl<'a> Iterator for LlamaModelFullPromptChatStream<'a> {
@@ -323,12 +339,17 @@ impl<'a> Iterator for LlamaModelFullPromptChatStream<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         fn next_(stream: &mut LlamaModelFullPromptChatStream<'_>) -> Option<String> {
+            if stream.is_error {
+                return None;
+            }
+
             loop {
                 let s = stream.llama_ctx.take_a_token();
-                if s.is_err() {
-                    println!("{:?}", s);
+                if let Err(e) = s {
+                    stream.is_error = true;
+                    return Some(e.to_string());
                 }
-                let s = s.ok()??;
+                let s = s.unwrap()?;
                 let post_handle = stream.llama_ctx.model.prompt_template.post_handle;
                 if stream.start_out {
                     break post_handle(s);
