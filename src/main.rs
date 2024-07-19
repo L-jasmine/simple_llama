@@ -77,7 +77,6 @@ mod lua_env {
             },
         )?;
 
-        // set_timer(time:int,text:string) // 这个函数可以设置一个定时器，time是时间间隔(s)，func是回调函数
         let remember =
             lua.create_function(|_, (time, text): (u64, String)| -> LuaResult<String> {
                 println!("set_timer {time}: {text}");
