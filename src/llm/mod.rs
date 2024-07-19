@@ -143,7 +143,7 @@ impl LlamaModelContext {
         system_prompt: Option<Vec<Content>>,
     ) -> anyhow::Result<Self> {
         let ctx = model.model.new_context(&model.backend, ctx_params)?;
-        let n_tokens = ctx.n_ctx();
+        let n_tokens = ctx.n_batch();
         let ctx = unsafe { std::mem::transmute(ctx) };
         let batch = LlamaBatch::new(n_tokens as usize, 1);
         let decoder = encoding_rs::UTF_8.new_decoder();
@@ -162,29 +162,36 @@ impl LlamaModelContext {
     pub fn user_message(&mut self, message: Content) -> anyhow::Result<()> {
         let encode_string = self.model.prompt_template.encode_string;
 
+        let mut tokens = self
+            .model
+            .model
+            .str_to_token(&encode_string(&[message]), model::AddBos::Always)?;
+
         if self.first_chat {
-            let tokens = self
+            let system_tokens = self
                 .model
                 .model
-                .str_to_token(&encode_string(&self.system_prompt), model::AddBos::Always)?;
-            for token in tokens.into_iter() {
-                self.batch.add(token, self.n_cur, &[0], false)?;
-                self.n_cur += 1;
-            }
+                .str_to_token(&encode_string(&self.system_prompt), model::AddBos::Never)?;
+
+            tokens.extend(system_tokens);
+
             self.first_chat = false;
         }
 
-        let tokens = self
-            .model
-            .model
-            .str_to_token(&encode_string(&[message]), model::AddBos::Never)?;
+        self.batch.clear();
 
-        // self.batch.clear();
+        let n_tokens = self.ctx.n_batch();
+
         let last_index = (tokens.len() - 1) as i32;
         for (i, token) in (0_i32..).zip(tokens.into_iter()) {
             let is_last = i == last_index;
             self.batch.add(token, self.n_cur, &[0], is_last)?;
             self.n_cur += 1;
+
+            if !is_last && self.batch.n_tokens() == n_tokens as i32 {
+                self.ctx.decode(&mut self.batch)?;
+                self.batch.clear();
+            }
         }
         Ok(())
     }
@@ -247,7 +254,7 @@ impl LlamaModelFullPromptContext {
         system_prompts: Option<Vec<Content>>,
     ) -> anyhow::Result<Self> {
         let ctx = model.model.new_context(&model.backend, ctx_params)?;
-        let n_tokens = ctx.n_ctx();
+        let n_tokens = ctx.n_batch();
         let ctx = unsafe { std::mem::transmute(ctx) };
         let batch = LlamaBatch::new(n_tokens as usize, 1);
         let decoder = encoding_rs::UTF_8.new_decoder();
@@ -285,6 +292,8 @@ impl LlamaModelFullPromptContext {
     fn reset_batch_with_prompt(&mut self) -> anyhow::Result<()> {
         self.ctx.clear_kv_cache();
         self.batch.clear();
+        self.n_cur = 0;
+
         let encode_string = self.model.prompt_template.encode_string;
 
         let tokens = self
@@ -292,8 +301,21 @@ impl LlamaModelFullPromptContext {
             .model
             .str_to_token(&encode_string(&self.prompts), model::AddBos::Always)?;
 
-        self.batch.add_sequence(&tokens, 0, false)?;
-        self.n_cur = tokens.len();
+        let last_index = (tokens.len() - 1) as i32;
+        let n_tokens = self.ctx.n_batch();
+
+        for (i, token) in (0_i32..).zip(tokens.into_iter()) {
+            let is_last = i == last_index;
+
+            self.batch.add(token, self.n_cur as i32, &[0], is_last)?;
+            self.n_cur += 1;
+
+            if !is_last && self.batch.n_tokens() == n_tokens as i32 {
+                self.ctx.decode(&mut self.batch)?;
+                self.batch.clear();
+            }
+        }
+
         Ok(())
     }
 
