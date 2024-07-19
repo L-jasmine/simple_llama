@@ -2,7 +2,7 @@ use clap::{Parser, ValueEnum};
 use lua_env::new_lua_hook;
 use std::{collections::HashMap, num::NonZeroU32};
 
-use lua_llama::{
+use simple_llama::{
     hook_llm,
     llm::{self, Content, LlamaContextParams, LlamaModelParams},
 };
@@ -37,11 +37,11 @@ enum ModelType {
 mod lua_env {
     use std::io::Write;
 
-    use lua_llama::{
+    use mlua::prelude::*;
+    use simple_llama::{
         llm::{Content, Role},
         IOHook,
     };
-    use mlua::prelude::*;
 
     pub fn new_lua_env() -> Result<Lua, LuaError> {
         let lua = Lua::new();
@@ -108,7 +108,7 @@ mod lua_env {
     }
 
     impl IOHook for LuaHook {
-        fn get_input(&mut self) -> anyhow::Result<Option<lua_llama::llm::Content>> {
+        fn get_input(&mut self) -> anyhow::Result<Option<simple_llama::llm::Content>> {
             if let Some(lua_result) = self.lua_result.take() {
                 println!("Lua:");
                 println!("{}", lua_result);
@@ -129,14 +129,14 @@ mod lua_env {
             }
         }
 
-        fn token_callback(&mut self, token: lua_llama::Token) -> anyhow::Result<()> {
+        fn token_callback(&mut self, token: simple_llama::Token) -> anyhow::Result<()> {
             match token {
-                lua_llama::Token::Start => println!("AI:"),
-                lua_llama::Token::Chunk(t) => {
+                simple_llama::Token::Start => println!("AI:"),
+                simple_llama::Token::Chunk(t) => {
                     print!("{}", t);
                     std::io::stdout().flush().unwrap();
                 }
-                lua_llama::Token::End(full_output) => {
+                simple_llama::Token::End(full_output) => {
                     println!();
                     if full_output.is_empty() || full_output.starts_with("--") {
                         return Ok(());
@@ -163,7 +163,7 @@ mod lua_env {
             Ok(())
         }
 
-        fn parse_input(&mut self, content: &mut lua_llama::llm::Content) {
+        fn parse_input(&mut self, content: &mut simple_llama::llm::Content) {
             match content.role {
                 Role::User => {
                     content.message = serde_json::json!({
