@@ -37,4 +37,3 @@ We welcome any form of contributions, including bug reports, new feature suggest
 ## License
 
 This project is licensed under the MIT License.
-```
