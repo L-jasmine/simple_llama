@@ -2,6 +2,10 @@
 name = "simple_llama"
 version = "0.1.0"
 edition = "2021"
+authors = ["csh <458761603@qq.com>"]
+description = "A crate for run llama.cpp in Rust. based on llama-cpp-2"
+repository = "https://github.com/L-jasmine/simple_llama"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
