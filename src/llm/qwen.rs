@@ -5,10 +5,11 @@ pub fn qwen_prompt_template() -> super::LlmPromptTemplate {
         let mut result = String::new();
         for c in content.iter() {
             result.push_str(&format!(
-                "<|im_start|>{}\r\n{}<|im_end|>\r\n",
+                "<|im_start|>{}\n{}<|im_end|>\n",
                 c.role, c.message
             ));
         }
+        println!("Encoded:\n {}", result);
         result
     }
 
@@ -16,9 +17,18 @@ pub fn qwen_prompt_template() -> super::LlmPromptTemplate {
         token.ends_with("\n")
     }
 
+    fn post_handle_content(content: &mut String) {
+        if content.ends_with("<|im_end|>") {
+            let bs = unsafe { content.as_mut_vec() };
+            let len = bs.len();
+            bs.truncate(len - "<|im_end|>".len());
+        }
+    }
+
     super::LlmPromptTemplate {
         encode_string,
         is_end_of_header,
         post_handle: LlmPromptTemplate::identity,
+        post_handle_content,
     }
 }

@@ -51,12 +51,12 @@ pub struct Content {
 pub struct LlmPromptTemplate {
     pub encode_string: fn(content: &[Content]) -> String,
     pub is_end_of_header: fn(token: &str) -> bool,
-    // for gemma2
-    pub post_handle: fn(token: String) -> Option<String>,
+    pub post_handle: fn(token: String, content: &str) -> Option<String>,
+    pub post_handle_content: fn(content: &mut String),
 }
 
 impl LlmPromptTemplate {
-    pub fn identity(token: String) -> Option<String> {
+    pub fn identity(token: String, _content: &str) -> Option<String> {
         Some(token)
     }
 }
@@ -99,40 +99,16 @@ pub struct LlamaModelContext {
     n_cur: i32,
 }
 
-pub struct LlamaModelChatStream<'a> {
+pub struct LlamaModelChatStream<'a, CTX> {
+    content: String,
     start_out: bool,
-    llama_ctx: &'a mut LlamaModelContext,
+    llama_ctx: &'a mut CTX,
     is_error: bool,
 }
 
-impl<'a> Iterator for LlamaModelChatStream<'a> {
-    type Item = String;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.is_error {
-            return None;
-        }
-
-        loop {
-            let s = self.llama_ctx.take_a_token();
-
-            if let Err(e) = s {
-                self.is_error = true;
-                return Some(e.to_string());
-            }
-
-            let s = s.unwrap()?;
-
-            let post_handle = self.llama_ctx.model.prompt_template.post_handle;
-            if self.start_out {
-                break post_handle(s);
-            } else {
-                let is_end_of_header = self.llama_ctx.model.prompt_template.is_end_of_header;
-                if is_end_of_header(&s) {
-                    self.start_out = true;
-                }
-            }
-        }
+impl<'a, CTX> Into<String> for LlamaModelChatStream<'a, CTX> {
+    fn into(self) -> String {
+        self.content
     }
 }
 
@@ -196,13 +172,14 @@ impl LlamaModelContext {
         Ok(())
     }
 
-    pub fn chat(&mut self, message: Content) -> anyhow::Result<LlamaModelChatStream> {
+    pub fn chat(&mut self, message: Content) -> anyhow::Result<LlamaModelChatStream<Self>> {
         self.user_message(message)?;
         let is_end_of_header = self.model.prompt_template.is_end_of_header;
         self.decoder = encoding_rs::UTF_8.new_decoder();
 
         let start_out = is_end_of_header("");
         Ok(LlamaModelChatStream {
+            content: String::with_capacity(128),
             start_out,
             llama_ctx: self,
             is_error: false,
@@ -273,7 +250,7 @@ impl LlamaModelFullPromptContext {
         self.prompts.push(message);
     }
 
-    pub fn chat(&mut self, message: Content) -> anyhow::Result<LlamaModelFullPromptChatStream> {
+    pub fn chat(&mut self, message: Content) -> anyhow::Result<LlamaModelChatStream<Self>> {
         self.add_message(message);
         self.decoder = encoding_rs::UTF_8.new_decoder();
         let is_end_of_header = self.model.prompt_template.is_end_of_header;
@@ -281,10 +258,10 @@ impl LlamaModelFullPromptContext {
 
         self.reset_batch_with_prompt()?;
 
-        Ok(LlamaModelFullPromptChatStream {
+        Ok(LlamaModelChatStream {
+            content: String::with_capacity(128),
             start_out,
             llama_ctx: self,
-            content_buff: String::new(),
             is_error: false,
         })
     }
@@ -349,18 +326,69 @@ impl LlamaModelFullPromptContext {
     }
 }
 
-pub struct LlamaModelFullPromptChatStream<'a> {
-    start_out: bool,
-    llama_ctx: &'a mut LlamaModelFullPromptContext,
-    content_buff: String,
-    is_error: bool,
+pub enum LlamaCtx {
+    Full(LlamaModelFullPromptContext),
+    Step(LlamaModelContext),
 }
 
-impl<'a> Iterator for LlamaModelFullPromptChatStream<'a> {
+impl From<LlamaModelFullPromptContext> for LlamaCtx {
+    fn from(llm: LlamaModelFullPromptContext) -> Self {
+        LlamaCtx::Full(llm)
+    }
+}
+
+impl From<LlamaModelContext> for LlamaCtx {
+    fn from(llm: LlamaModelContext) -> Self {
+        LlamaCtx::Step(llm)
+    }
+}
+
+impl<'a> Iterator for LlamaModelChatStream<'a, LlamaModelContext> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
-        fn next_(stream: &mut LlamaModelFullPromptChatStream<'_>) -> Option<String> {
+        if self.is_error {
+            return None;
+        }
+
+        let r = loop {
+            let s = self.llama_ctx.take_a_token();
+
+            if let Err(e) = s {
+                self.is_error = true;
+                return Some(e.to_string());
+            }
+
+            let s = s.unwrap()?;
+
+            let post_handle = self.llama_ctx.model.prompt_template.post_handle;
+            if self.start_out {
+                break post_handle(s, &self.content);
+            } else {
+                let is_end_of_header = self.llama_ctx.model.prompt_template.is_end_of_header;
+                if is_end_of_header(&s) {
+                    self.start_out = true;
+                }
+            }
+        };
+        if let Some(r) = &r {
+            self.content.push_str(r);
+        } else {
+            let post_handle_content = self.llama_ctx.model.prompt_template.post_handle_content;
+            post_handle_content(&mut self.content)
+        }
+
+        r
+    }
+}
+
+impl<'a> Iterator for LlamaModelChatStream<'a, LlamaModelFullPromptContext> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        fn next_(
+            stream: &mut LlamaModelChatStream<'_, LlamaModelFullPromptContext>,
+        ) -> Option<String> {
             if stream.is_error {
                 return None;
             }
@@ -374,7 +402,7 @@ impl<'a> Iterator for LlamaModelFullPromptChatStream<'a> {
                 let s = s.unwrap()?;
                 let post_handle = stream.llama_ctx.model.prompt_template.post_handle;
                 if stream.start_out {
-                    break post_handle(s);
+                    break post_handle(s, &stream.content);
                 } else {
                     let is_end_of_header = stream.llama_ctx.model.prompt_template.is_end_of_header;
                     if is_end_of_header(&s) {
@@ -386,14 +414,14 @@ impl<'a> Iterator for LlamaModelFullPromptChatStream<'a> {
 
         let r = next_(self);
         if let Some(s) = &r {
-            self.content_buff.push_str(s);
+            self.content.push_str(s);
         } else {
-            let mut message = String::new();
-            std::mem::swap(&mut message, &mut self.content_buff);
+            let post_handle_content = self.llama_ctx.model.prompt_template.post_handle_content;
+            post_handle_content(&mut self.content);
             self.llama_ctx.add_message(Content {
-                role: Role::Assistant,
-                message,
-            })
+                role: crate::llm::Role::Assistant,
+                message: self.content.clone(),
+            });
         }
         r
     }

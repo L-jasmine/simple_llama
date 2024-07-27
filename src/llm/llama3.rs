@@ -14,10 +14,27 @@ pub fn llama3_prompt_template() -> super::LlmPromptTemplate {
         token == "<|end_header_id|>"
     }
 
+    fn post_handle(token: String, content: &str) -> Option<String> {
+        if token == "<|eot_id|>" || content.ends_with("<|eot_id|>") || content.ends_with("#") {
+            None
+        } else {
+            Some(token)
+        }
+    }
+
+    fn post_handle_content(content: &mut String) {
+        if content.ends_with("<|eot_id|>") {
+            let bs = unsafe { content.as_mut_vec() };
+            let len = bs.len();
+            bs.truncate(len - "<|eot_id|>".len());
+        }
+    }
+
     super::LlmPromptTemplate {
         encode_string,
         is_end_of_header,
-        post_handle: super::LlmPromptTemplate::identity,
+        post_handle,
+        post_handle_content,
     }
 }
 
@@ -26,7 +43,7 @@ pub fn hermes_2_pro_llama3_prompt_template() -> super::LlmPromptTemplate {
         let mut result = String::new();
         for c in content.iter() {
             result.push_str(&format!(
-                "<|im_start|>{}\r\n{}<|im_end|>\r\n",
+                "<|im_start|>{}\r{}<|im_end|>\r",
                 c.role, c.message
             ));
         }
@@ -37,9 +54,18 @@ pub fn hermes_2_pro_llama3_prompt_template() -> super::LlmPromptTemplate {
         true
     }
 
+    fn post_handle_content(content: &mut String) {
+        if content.ends_with("<|im_end|>") {
+            let bs = unsafe { content.as_mut_vec() };
+            let len = bs.len();
+            bs.truncate(len - "<|im_end|>".len());
+        }
+    }
+
     super::LlmPromptTemplate {
         encode_string,
         is_end_of_header,
         post_handle: super::LlmPromptTemplate::identity,
+        post_handle_content,
     }
 }

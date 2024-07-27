@@ -136,6 +136,9 @@ mod lua_env {
                     print!("{}", t);
                     std::io::stdout().flush().unwrap();
                 }
+                // simple_llama::Token::End(_) => {
+                //     println!();
+                // }
                 simple_llama::Token::End(full_output) => {
                     println!();
                     if full_output.is_empty() || full_output.starts_with("--") {
@@ -206,7 +209,7 @@ fn main() {
     let mut prompt: HashMap<String, Vec<Content>> = toml::from_str(&prompt).unwrap();
     let sys_prompt = prompt.remove("content").unwrap();
 
-    let model_params = LlamaModelParams::default().with_n_gpu_layers(512);
+    let model_params = LlamaModelParams::default().with_n_gpu_layers(64);
 
     let template = match cli.model_type {
         ModelType::Llama3 => llm::llama3::llama3_prompt_template(),
