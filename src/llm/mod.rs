@@ -90,6 +90,9 @@ impl PromptTemplate {
                 result.push_str(&self.header_suffix);
             }
         }
+
+        log::debug!("prompts:\n{}", result);
+
         result
     }
 

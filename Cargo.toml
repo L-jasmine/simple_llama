@@ -14,6 +14,7 @@ anyhow = "1"
 encoding_rs = "0.8.34"
 serde = { version = "1.0", features = ["derive"] }
 llama-cpp-2 = { version = "0.1.62", features = ["dynamic_link"] }
+log = "0.4"
 
 [dev-dependencies]
 clap = { version = "4.5.7", features = ["derive"] }
