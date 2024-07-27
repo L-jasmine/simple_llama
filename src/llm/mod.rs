@@ -8,10 +8,6 @@ use llama_cpp_2::{
     token::data_array::LlamaTokenDataArray,
 };
 
-pub mod gemma;
-pub mod llama3;
-pub mod qwen;
-
 pub use llama_cpp_2::context::params::LlamaContextParams;
 pub use llama_cpp_2::model::params::LlamaModelParams;
 
