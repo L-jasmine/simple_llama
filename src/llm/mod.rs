@@ -66,16 +66,71 @@ impl Default for SimpleOption {
     }
 }
 
-pub struct LlmPromptTemplate {
-    pub encode_string: fn(content: &[Content]) -> String,
-    pub is_end_of_header: fn(token: &str) -> bool,
-    pub post_handle: fn(token: String, content: &str) -> Option<String>,
-    pub post_handle_content: fn(content: &mut String),
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PromptTemplate {
+    pub header_prefix: String,
+    pub header_suffix: String,
+    pub end_of_content: String,
+    pub stops: Vec<String>,
 }
 
-impl LlmPromptTemplate {
-    pub fn identity(token: String, _content: &str) -> Option<String> {
+impl PromptTemplate {
+    fn encode_string(&self, content: &[Content]) -> String {
+        let mut result = String::with_capacity(128);
+        for c in content.iter() {
+            result.push_str(&self.header_prefix);
+            result.push_str(&c.role.to_string());
+            result.push_str(&self.header_suffix);
+            result.push_str(&c.message);
+            result.push_str(&self.end_of_content);
+        }
+        if let Some(c) = content.last() {
+            if c.role != Role::Assistant {
+                result.push_str(&self.header_prefix);
+                result.push_str("assistant");
+                result.push_str(&self.header_suffix);
+            }
+        }
+        result
+    }
+
+    fn post_handle(&self, token: String, content: &str) -> Option<String> {
+        if self.stops.contains(&token) {
+            return None;
+        }
+
+        for stop in &self.stops {
+            if content.ends_with(stop) {
+                return None;
+            }
+        }
+
         Some(token)
+    }
+
+    fn post_handle_content(&self, content: &mut String) {
+        let header = format!(
+            "{}{}{}",
+            self.header_prefix,
+            Role::Assistant,
+            self.header_suffix
+        );
+
+        if let Some(s) = content.strip_prefix(&header) {
+            *content = s.to_string();
+        }
+
+        let bs = unsafe { content.as_mut_vec() };
+        let len = bs.len();
+
+        for stop in &self.stops {
+            let stop_bs = stop.as_bytes();
+
+            if bs.ends_with(stop_bs) {
+                bs.truncate(len - stop_bs.len());
+                break;
+            }
+        }
     }
 }
 
@@ -85,14 +140,14 @@ pub struct LlmModel {
     pub model: LlamaModel,
     pub model_params: LlamaModelParams,
     pub backend: LlamaBackend,
-    pub prompt_template: LlmPromptTemplate,
+    pub prompt_template: PromptTemplate,
 }
 
 impl LlmModel {
     pub fn new(
         model_path: String,
         model_params: LlamaModelParams,
-        prompt_template: LlmPromptTemplate,
+        prompt_template: PromptTemplate,
     ) -> llama_cpp_2::Result<Arc<Self>> {
         let backend = LlamaBackend::init()?;
         let llama = LlamaModel::load_from_file(&backend, &model_path, &model_params)?;
@@ -119,7 +174,6 @@ pub struct LlamaModelContext {
 
 pub struct LlamaModelChatStream<'a, CTX> {
     content: String,
-    start_out: bool,
     llama_ctx: &'a mut CTX,
     is_error: bool,
     simple_option: SimpleOption,
@@ -155,18 +209,19 @@ impl LlamaModelContext {
     }
 
     pub fn user_message(&mut self, message: Content) -> anyhow::Result<()> {
-        let encode_string = self.model.prompt_template.encode_string;
-
-        let mut tokens = self
-            .model
-            .model
-            .str_to_token(&encode_string(&[message]), model::AddBos::Always)?;
+        let mut tokens = self.model.model.str_to_token(
+            &self.model.prompt_template.encode_string(&[message]),
+            model::AddBos::Always,
+        )?;
 
         if self.first_chat {
-            let system_tokens = self
-                .model
-                .model
-                .str_to_token(&encode_string(&self.system_prompt), model::AddBos::Never)?;
+            let system_tokens = self.model.model.str_to_token(
+                &self
+                    .model
+                    .prompt_template
+                    .encode_string(&self.system_prompt),
+                model::AddBos::Never,
+            )?;
 
             tokens.extend(system_tokens);
 
@@ -195,13 +250,10 @@ impl LlamaModelContext {
         match request {
             ChatRequest::Once(message, simple_option) => {
                 self.user_message(message)?;
-                let is_end_of_header = self.model.prompt_template.is_end_of_header;
                 self.decoder = encoding_rs::UTF_8.new_decoder();
 
-                let start_out = is_end_of_header("");
                 Ok(LlamaModelChatStream {
                     content: String::with_capacity(128),
-                    start_out,
                     llama_ctx: self,
                     is_error: false,
                     simple_option,
@@ -285,14 +337,11 @@ impl LlamaModelFullPromptContext {
             ChatRequest::Once(message, simple_option) => {
                 self.add_message(message);
                 self.decoder = encoding_rs::UTF_8.new_decoder();
-                let is_end_of_header = self.model.prompt_template.is_end_of_header;
-                let start_out = is_end_of_header("");
 
                 self.reset_batch_with_prompt(None)?;
 
                 Ok(LlamaModelChatStream {
                     content: String::with_capacity(128),
-                    start_out,
                     llama_ctx: self,
                     is_error: false,
                     simple_option,
@@ -300,14 +349,11 @@ impl LlamaModelFullPromptContext {
             }
             ChatRequest::Full(prompts, simple_option) => {
                 self.decoder = encoding_rs::UTF_8.new_decoder();
-                let is_end_of_header = self.model.prompt_template.is_end_of_header;
-                let start_out = is_end_of_header("");
 
                 self.reset_batch_with_prompt(Some(&prompts))?;
 
                 Ok(LlamaModelChatStream {
                     content: String::with_capacity(128),
-                    start_out,
                     llama_ctx: self,
                     is_error: false,
                     simple_option,
@@ -321,14 +367,12 @@ impl LlamaModelFullPromptContext {
         self.batch.clear();
         self.n_cur = 0;
 
-        let encode_string = self.model.prompt_template.encode_string;
-
         let prompts = prompts.unwrap_or(&self.prompts);
 
-        let tokens = self
-            .model
-            .model
-            .str_to_token(&encode_string(prompts), model::AddBos::Always)?;
+        let tokens = self.model.model.str_to_token(
+            &self.model.prompt_template.encode_string(prompts),
+            model::AddBos::Always,
+        )?;
 
         let last_index = (tokens.len() - 1) as i32;
         let n_tokens = self.ctx.n_batch();
@@ -408,31 +452,28 @@ impl<'a> Iterator for LlamaModelChatStream<'a, LlamaModelContext> {
             return None;
         }
 
-        let r = loop {
-            let s = self.llama_ctx.take_a_token(self.simple_option);
+        let s = self.llama_ctx.take_a_token(self.simple_option);
 
-            if let Err(e) = s {
-                self.is_error = true;
-                return Some(e.to_string());
-            }
+        if let Err(e) = s {
+            self.is_error = true;
+            return Some(e.to_string());
+        }
 
-            let s = s.unwrap()?;
+        let s = s.unwrap()?;
 
-            let post_handle = self.llama_ctx.model.prompt_template.post_handle;
-            if self.start_out {
-                break post_handle(s, &self.content);
-            } else {
-                let is_end_of_header = self.llama_ctx.model.prompt_template.is_end_of_header;
-                if is_end_of_header(&s) {
-                    self.start_out = true;
-                }
-            }
-        };
+        let r = self
+            .llama_ctx
+            .model
+            .prompt_template
+            .post_handle(s, &self.content);
+
         if let Some(r) = &r {
             self.content.push_str(r);
         } else {
-            let post_handle_content = self.llama_ctx.model.prompt_template.post_handle_content;
-            post_handle_content(&mut self.content)
+            self.llama_ctx
+                .model
+                .prompt_template
+                .post_handle_content(&mut self.content)
         }
 
         r
@@ -450,31 +491,27 @@ impl<'a> Iterator for LlamaModelChatStream<'a, LlamaModelFullPromptContext> {
                 return None;
             }
 
-            loop {
-                let s = stream.llama_ctx.take_a_token(stream.simple_option);
-                if let Err(e) = s {
-                    stream.is_error = true;
-                    return Some(e.to_string());
-                }
-                let s = s.unwrap()?;
-                let post_handle = stream.llama_ctx.model.prompt_template.post_handle;
-                if stream.start_out {
-                    break post_handle(s, &stream.content);
-                } else {
-                    let is_end_of_header = stream.llama_ctx.model.prompt_template.is_end_of_header;
-                    if is_end_of_header(&s) {
-                        stream.start_out = true;
-                    }
-                }
+            let s = stream.llama_ctx.take_a_token(stream.simple_option);
+            if let Err(e) = s {
+                stream.is_error = true;
+                return Some(e.to_string());
             }
+            let s = s.unwrap()?;
+            stream
+                .llama_ctx
+                .model
+                .prompt_template
+                .post_handle(s, &stream.content)
         }
 
         let r = next_(self);
         if let Some(s) = &r {
             self.content.push_str(s);
         } else {
-            let post_handle_content = self.llama_ctx.model.prompt_template.post_handle_content;
-            post_handle_content(&mut self.content);
+            self.llama_ctx
+                .model
+                .prompt_template
+                .post_handle_content(&mut self.content);
             self.llama_ctx.add_message(Content {
                 role: crate::llm::Role::Assistant,
                 message: self.content.clone(),
