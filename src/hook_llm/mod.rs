@@ -1,9 +1,8 @@
-use crate::llm::{Content, LlamaCtx, LlamaModelContext, LlamaModelFullPromptContext};
+use crate::llm::{ChatRequest, LlamaCtx, LlamaModelContext, LlamaModelFullPromptContext};
 
 pub trait IOHook {
-    fn get_input(&mut self) -> anyhow::Result<Option<Content>>;
+    fn get_input(&mut self) -> anyhow::Result<Option<ChatRequest>>;
     fn token_callback(&mut self, token: Token) -> anyhow::Result<()>;
-    fn parse_input(&mut self, content: &mut Content);
 }
 
 pub struct HookLlama<Hook: IOHook> {
@@ -24,13 +23,11 @@ fn full_chat<Hook: IOHook>(
 ) -> anyhow::Result<()> {
     loop {
         let message = hook.get_input()?;
-        let mut content = if let Some(content) = message {
+        let content = if let Some(content) = message {
             content
         } else {
             return Ok(());
         };
-
-        hook.parse_input(&mut content);
 
         let mut chat = ctx.chat(content)?;
 
@@ -45,13 +42,11 @@ fn full_chat<Hook: IOHook>(
 fn chat<Hook: IOHook>(ctx: &mut LlamaModelContext, hook: &mut Hook) -> anyhow::Result<()> {
     loop {
         let message = hook.get_input()?;
-        let mut content = if let Some(content) = message {
+        let content = if let Some(content) = message {
             content
         } else {
             return Ok(());
         };
-
-        hook.parse_input(&mut content);
 
         let mut chat = ctx.chat(content)?;
 
@@ -64,16 +59,7 @@ fn chat<Hook: IOHook>(ctx: &mut LlamaModelContext, hook: &mut Hook) -> anyhow::R
 }
 
 impl<Hook: IOHook> HookLlama<Hook> {
-    pub fn new(mut ctx: LlamaCtx, mut hook: Hook) -> Self {
-        let prompts = match &mut ctx {
-            LlamaCtx::Full(ctx) => &mut ctx.prompts,
-            LlamaCtx::Step(ctx) => &mut ctx.system_prompt,
-        };
-
-        for prompt in prompts.iter_mut() {
-            hook.parse_input(prompt);
-        }
-
+    pub fn new(ctx: LlamaCtx, hook: Hook) -> Self {
         Self { llm: ctx, hook }
     }
 

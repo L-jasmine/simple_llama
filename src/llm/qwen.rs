@@ -9,7 +9,6 @@ pub fn qwen_prompt_template() -> super::LlmPromptTemplate {
                 c.role, c.message
             ));
         }
-        println!("Encoded:\n {}", result);
         result
     }
 

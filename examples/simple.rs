@@ -107,25 +107,50 @@ mod lua_env {
         stdin: std::io::Stdin,
     }
 
+    fn parse_input(content: &mut simple_llama::llm::Content) {
+        match content.role {
+            Role::User => {
+                content.message = serde_json::json!({
+                    "role":"user",
+                    "message":content.message
+                })
+                .to_string();
+            }
+            Role::Tool => {
+                content.role = Role::User;
+                content.message = format!("{{ \"role\":\"tool\",\"message\":{}}}", content.message);
+            }
+            _ => {}
+        }
+    }
+
     impl IOHook for LuaHook {
-        fn get_input(&mut self) -> anyhow::Result<Option<simple_llama::llm::Content>> {
+        fn get_input(&mut self) -> anyhow::Result<Option<simple_llama::llm::ChatRequest>> {
             if let Some(lua_result) = self.lua_result.take() {
                 println!("Lua:");
                 println!("{}", lua_result);
-                let c = Content {
+                let mut c = Content {
                     role: Role::Tool,
                     message: lua_result,
                 };
-                Ok(Some(c))
+                parse_input(&mut c);
+                Ok(Some(simple_llama::llm::ChatRequest::Once(
+                    c,
+                    simple_llama::llm::SimpleOption::None,
+                )))
             } else {
                 println!("User:");
                 let mut line = String::with_capacity(64);
                 self.stdin.read_line(&mut line)?;
-                let c = Content {
+                let mut c = Content {
                     role: Role::User,
                     message: line,
                 };
-                Ok(Some(c))
+                parse_input(&mut c);
+                Ok(Some(simple_llama::llm::ChatRequest::Once(
+                    c,
+                    simple_llama::llm::SimpleOption::None,
+                )))
             }
         }
 
@@ -164,24 +189,6 @@ mod lua_env {
                 }
             }
             Ok(())
-        }
-
-        fn parse_input(&mut self, content: &mut simple_llama::llm::Content) {
-            match content.role {
-                Role::User => {
-                    content.message = serde_json::json!({
-                        "role":"user",
-                        "message":content.message
-                    })
-                    .to_string();
-                }
-                Role::Tool => {
-                    content.role = Role::User;
-                    content.message =
-                        format!("{{ \"role\":\"tool\",\"message\":{}}}", content.message);
-                }
-                _ => {}
-            }
         }
     }
 

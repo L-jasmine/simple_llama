@@ -48,6 +48,24 @@ pub struct Content {
     pub message: String,
 }
 
+pub enum ChatRequest {
+    Once(Content, SimpleOption),
+    Full(Vec<Content>, SimpleOption),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SimpleOption {
+    None,
+    Temp(f32),
+    TopP(f32, usize),
+}
+
+impl Default for SimpleOption {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 pub struct LlmPromptTemplate {
     pub encode_string: fn(content: &[Content]) -> String,
     pub is_end_of_header: fn(token: &str) -> bool,
@@ -104,6 +122,7 @@ pub struct LlamaModelChatStream<'a, CTX> {
     start_out: bool,
     llama_ctx: &'a mut CTX,
     is_error: bool,
+    simple_option: SimpleOption,
 }
 
 impl<'a, CTX> Into<String> for LlamaModelChatStream<'a, CTX> {
@@ -172,25 +191,36 @@ impl LlamaModelContext {
         Ok(())
     }
 
-    pub fn chat(&mut self, message: Content) -> anyhow::Result<LlamaModelChatStream<Self>> {
-        self.user_message(message)?;
-        let is_end_of_header = self.model.prompt_template.is_end_of_header;
-        self.decoder = encoding_rs::UTF_8.new_decoder();
+    pub fn chat(&mut self, request: ChatRequest) -> anyhow::Result<LlamaModelChatStream<Self>> {
+        match request {
+            ChatRequest::Once(message, simple_option) => {
+                self.user_message(message)?;
+                let is_end_of_header = self.model.prompt_template.is_end_of_header;
+                self.decoder = encoding_rs::UTF_8.new_decoder();
 
-        let start_out = is_end_of_header("");
-        Ok(LlamaModelChatStream {
-            content: String::with_capacity(128),
-            start_out,
-            llama_ctx: self,
-            is_error: false,
-        })
+                let start_out = is_end_of_header("");
+                Ok(LlamaModelChatStream {
+                    content: String::with_capacity(128),
+                    start_out,
+                    llama_ctx: self,
+                    is_error: false,
+                    simple_option,
+                })
+            }
+            ChatRequest::Full(_, _) => Err(anyhow::anyhow!("no support for full chat")),
+        }
     }
 
-    fn take_a_token(&mut self) -> anyhow::Result<Option<String>> {
+    fn take_a_token(&mut self, simple_option: SimpleOption) -> anyhow::Result<Option<String>> {
         self.ctx.decode(&mut self.batch)?;
 
         let candidates = self.ctx.candidates_ith(self.batch.n_tokens() - 1);
         let mut candidates_p = LlamaTokenDataArray::from_iter(candidates, false);
+        match simple_option {
+            SimpleOption::None => {}
+            SimpleOption::Temp(temperature) => candidates_p.sample_temp(None, temperature),
+            SimpleOption::TopP(p, min_keep) => candidates_p.sample_top_p(None, p, min_keep),
+        }
 
         let new_token_id = candidates_p.sample_token(&mut self.ctx);
 
@@ -250,33 +280,55 @@ impl LlamaModelFullPromptContext {
         self.prompts.push(message);
     }
 
-    pub fn chat(&mut self, message: Content) -> anyhow::Result<LlamaModelChatStream<Self>> {
-        self.add_message(message);
-        self.decoder = encoding_rs::UTF_8.new_decoder();
-        let is_end_of_header = self.model.prompt_template.is_end_of_header;
-        let start_out = is_end_of_header("");
+    pub fn chat(&mut self, request: ChatRequest) -> anyhow::Result<LlamaModelChatStream<Self>> {
+        match request {
+            ChatRequest::Once(message, simple_option) => {
+                self.add_message(message);
+                self.decoder = encoding_rs::UTF_8.new_decoder();
+                let is_end_of_header = self.model.prompt_template.is_end_of_header;
+                let start_out = is_end_of_header("");
 
-        self.reset_batch_with_prompt()?;
+                self.reset_batch_with_prompt(None)?;
 
-        Ok(LlamaModelChatStream {
-            content: String::with_capacity(128),
-            start_out,
-            llama_ctx: self,
-            is_error: false,
-        })
+                Ok(LlamaModelChatStream {
+                    content: String::with_capacity(128),
+                    start_out,
+                    llama_ctx: self,
+                    is_error: false,
+                    simple_option,
+                })
+            }
+            ChatRequest::Full(prompts, simple_option) => {
+                self.decoder = encoding_rs::UTF_8.new_decoder();
+                let is_end_of_header = self.model.prompt_template.is_end_of_header;
+                let start_out = is_end_of_header("");
+
+                self.reset_batch_with_prompt(Some(&prompts))?;
+
+                Ok(LlamaModelChatStream {
+                    content: String::with_capacity(128),
+                    start_out,
+                    llama_ctx: self,
+                    is_error: false,
+                    simple_option,
+                })
+            }
+        }
     }
 
-    fn reset_batch_with_prompt(&mut self) -> anyhow::Result<()> {
+    fn reset_batch_with_prompt(&mut self, prompts: Option<&[Content]>) -> anyhow::Result<()> {
         self.ctx.clear_kv_cache();
         self.batch.clear();
         self.n_cur = 0;
 
         let encode_string = self.model.prompt_template.encode_string;
 
+        let prompts = prompts.unwrap_or(&self.prompts);
+
         let tokens = self
             .model
             .model
-            .str_to_token(&encode_string(&self.prompts), model::AddBos::Always)?;
+            .str_to_token(&encode_string(prompts), model::AddBos::Always)?;
 
         let last_index = (tokens.len() - 1) as i32;
         let n_tokens = self.ctx.n_batch();
@@ -296,11 +348,16 @@ impl LlamaModelFullPromptContext {
         Ok(())
     }
 
-    fn take_a_token(&mut self) -> anyhow::Result<Option<String>> {
+    fn take_a_token(&mut self, simple_option: SimpleOption) -> anyhow::Result<Option<String>> {
         self.ctx.decode(&mut self.batch)?;
 
         let candidates = self.ctx.candidates_ith(self.batch.n_tokens() - 1);
         let mut candidates_p = LlamaTokenDataArray::from_iter(candidates, false);
+        match simple_option {
+            SimpleOption::None => {}
+            SimpleOption::Temp(temperature) => candidates_p.sample_temp(None, temperature),
+            SimpleOption::TopP(p, min_keep) => candidates_p.sample_top_p(None, p, min_keep),
+        }
 
         let new_token_id = candidates_p.sample_token(&mut self.ctx);
 
@@ -352,7 +409,7 @@ impl<'a> Iterator for LlamaModelChatStream<'a, LlamaModelContext> {
         }
 
         let r = loop {
-            let s = self.llama_ctx.take_a_token();
+            let s = self.llama_ctx.take_a_token(self.simple_option);
 
             if let Err(e) = s {
                 self.is_error = true;
@@ -394,7 +451,7 @@ impl<'a> Iterator for LlamaModelChatStream<'a, LlamaModelFullPromptContext> {
             }
 
             loop {
-                let s = stream.llama_ctx.take_a_token();
+                let s = stream.llama_ctx.take_a_token(stream.simple_option);
                 if let Err(e) = s {
                     stream.is_error = true;
                     return Some(e.to_string());
