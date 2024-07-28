@@ -80,13 +80,23 @@ pub struct PromptTemplate {
 impl PromptTemplate {
     fn encode_string<C: AsRef<Content>>(&self, content: &[C]) -> String {
         let mut result = String::with_capacity(128);
-        for c in content.iter() {
+        let len = content.len();
+        for (i, c) in content.iter().enumerate() {
             let c = c.as_ref();
             result.push_str(&self.header_prefix);
             result.push_str(&c.role.to_string());
             result.push_str(&self.header_suffix);
             result.push_str(&c.message);
-            result.push_str(&self.end_of_content);
+            if i == len - 1 {
+                if c.role != Role::Assistant {
+                    result.push_str(&self.end_of_content);
+                    result.push_str(&self.header_prefix);
+                    result.push_str("assistant");
+                    result.push_str(&self.header_suffix);
+                }
+            } else {
+                result.push_str(&self.end_of_content);
+            }
         }
         if let Some(c) = content.last() {
             let c = c.as_ref();
