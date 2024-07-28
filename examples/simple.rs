@@ -75,11 +75,7 @@ fn main() {
 
     let prompt = std::fs::read_to_string(&cli.prompt_path).unwrap();
     let mut prompt: HashMap<String, Vec<Content>> = toml::from_str(&prompt).unwrap();
-    let prompts = prompt.remove("content").unwrap();
-    let mut prompts: Vec<_> = prompts
-        .into_iter()
-        .map(|content| Arc::new(content))
-        .collect();
+    let mut prompts = prompt.remove("content").unwrap();
 
     let model_params = LlamaModelParams::default().with_n_gpu_layers(64);
 
@@ -99,10 +95,10 @@ fn main() {
         println!("You:");
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).unwrap();
-        prompts.push(Arc::new(Content {
+        prompts.push(Content {
             role: llm::Role::User,
             message: input.trim().to_string(),
-        }));
+        });
 
         let mut stream = ctx.chat(&prompts, llm::SimpleOption::None).unwrap();
 
@@ -115,9 +111,9 @@ fn main() {
         println!();
         println!("Full:{}", full);
 
-        prompts.push(Arc::new(Content {
+        prompts.push(Content {
             role: llm::Role::Assistant,
             message: full,
-        }));
+        });
     }
 }

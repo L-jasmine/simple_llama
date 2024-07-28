@@ -50,6 +50,12 @@ pub struct Content {
     pub message: String,
 }
 
+impl AsRef<Content> for Content {
+    fn as_ref(&self) -> &Content {
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SimpleOption {
     None,
