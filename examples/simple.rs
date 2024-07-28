@@ -1,10 +1,7 @@
 use clap::{Parser, ValueEnum};
 use std::{collections::HashMap, io::Write, num::NonZeroU32, sync::Arc};
 
-use simple_llama::{
-    llm::{self, Content, LlamaContextParams, LlamaModelParams},
-    ChatRequest,
-};
+use simple_llama::llm::{self, Content, LlamaContextParams, LlamaModelParams};
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -107,12 +104,7 @@ fn main() {
             message: input.trim().to_string(),
         }));
 
-        let mut stream = ctx
-            .chat(ChatRequest {
-                prompts: prompts.clone(),
-                simple_option: llm::SimpleOption::None,
-            })
-            .unwrap();
+        let mut stream = ctx.chat(&prompts, llm::SimpleOption::None).unwrap();
 
         println!("Bot:");
         for token in &mut stream {

@@ -44,12 +44,6 @@ pub struct Content {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct ChatRequest {
-    pub prompts: Vec<Arc<Content>>,
-    pub simple_option: SimpleOption,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum SimpleOption {
     None,
@@ -203,12 +197,11 @@ impl LlamaCtx {
         })
     }
 
-    pub fn chat(&mut self, request: ChatRequest) -> anyhow::Result<LlamaModelChatStream<Self>> {
-        let ChatRequest {
-            prompts,
-            simple_option,
-        } = request;
-
+    pub fn chat<C: AsRef<Content>>(
+        &mut self,
+        prompts: &[C],
+        simple_option: SimpleOption,
+    ) -> anyhow::Result<LlamaModelChatStream<Self>> {
         self.decoder = encoding_rs::UTF_8.new_decoder();
 
         self.reset_batch_with_prompt(&prompts)?;
@@ -221,7 +214,7 @@ impl LlamaCtx {
         })
     }
 
-    fn reset_batch_with_prompt(&mut self, prompts: &[Arc<Content>]) -> anyhow::Result<()> {
+    fn reset_batch_with_prompt<C: AsRef<Content>>(&mut self, prompts: &[C]) -> anyhow::Result<()> {
         self.ctx.clear_kv_cache();
         self.batch.clear();
         self.n_cur = 0;
