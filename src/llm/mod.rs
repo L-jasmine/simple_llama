@@ -27,14 +27,20 @@ pub enum Role {
 
 impl Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let role = match self {
+        let role = self.as_ref();
+        write!(f, "{role}")
+    }
+}
+
+impl AsRef<str> for Role {
+    fn as_ref(&self) -> &str {
+        match self {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::Tool => "tool",
             Role::Other(s) => s.as_str(),
-        };
-        write!(f, "{role}")
+        }
     }
 }
 
